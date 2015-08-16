@@ -101,7 +101,10 @@ vtkImagePyramid::vtkImagePyramid(vtkImageData *img, int PyramidLevelCount)
 //------------------------------------------------------------------------------
 vtkImagePyramid::~vtkImagePyramid()
 {
-  // TODO - Complete the destructor
+  for(size_t i = 0; i < 6; ++i)
+    {
+    this->vtkImagePyramidData[i] = NULL;
+    }
 }
 
 //------------------------------------------------------------------------------

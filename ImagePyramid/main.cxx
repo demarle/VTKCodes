@@ -30,8 +30,6 @@
 #include <vtkImageConvolve.h>
 
 #include <vtkImageData.h>
-#include <vtkImageDifference.h>
-
 #include <vtkImageExtractComponents.h>
 #include <vtkImageGaussianSmooth.h>
 #include <vtkImageMathematics.h>
@@ -68,27 +66,44 @@ int main(int argc, char* argv[])
     dirString = argv[1];
     }
 
-  // Have to define these variables as global since used in mapper, can be optimised better
-  vtkImagePyramid *Pyramid[3];
 
+  //All of the filters we use internally
+  vtkSmartPointer<vtkImageMathematics> differenceBooster = vtkSmartPointer<vtkImageMathematics>::New();
+  vtkSmartPointer<vtkImageReader2Factory> readerFactory = vtkSmartPointer<vtkImageReader2Factory>::New();
+  vtkSmartPointer<vtkImageRGBToYIQ> yiqFilter = vtkSmartPointer<vtkImageRGBToYIQ>::New();
+  vtkSmartPointer<vtkImageExtractComponents> extractFilter = vtkSmartPointer<vtkImageExtractComponents>::New();
+  vtkSmartPointer<vtkImageWeightedSum> sumFilter1 = vtkSmartPointer<vtkImageWeightedSum>::New();
+  vtkSmartPointer<vtkImageWeightedSum> sumFilter2 = vtkSmartPointer<vtkImageWeightedSum>::New();
+  vtkSmartPointer<vtkImageMathematics> imageMath = vtkSmartPointer<vtkImageMathematics>::New();
+  vtkSmartPointer<vtkImageResize> resize = vtkSmartPointer<vtkImageResize>::New();
+  vtkSmartPointer<vtkImageWeightedSum> sumFilter = vtkSmartPointer<vtkImageWeightedSum>::New();
+  vtkSmartPointer<vtkImageConvolve> convolveFilter2 = vtkSmartPointer<vtkImageConvolve>::New();
+  vtkSmartPointer<vtkImageMathematics> chromaticCorrection = vtkSmartPointer<vtkImageMathematics>::New();
+  vtkSmartPointer<vtkImageWeightedSum> addDifferenceOrigFrameFilter = vtkSmartPointer<vtkImageWeightedSum>::New();
+  vtkSmartPointer<vtkImageMathematics> IntensityNormalisation = vtkSmartPointer<vtkImageMathematics>::New();
+  vtkSmartPointer<vtkImageAppendComponents> appendFilter = vtkSmartPointer<vtkImageAppendComponents>::New();
+  vtkSmartPointer<vtkImageYIQToRGB> rgbConversionFilter = vtkSmartPointer<vtkImageYIQToRGB>::New();
+  vtkSmartPointer<vtkPNGWriter> writeDifferenceFrames = vtkSmartPointer<vtkPNGWriter>::New();
+
+
+  //All of the datastructures we put our partial results into
+  vtkImagePyramid *Pyramid[3];
   vtkImagePyramid *lowPass1[3];
   vtkImagePyramid *lowPass2[3];
   vtkImagePyramid *Difference[3];
-  vtkImageData * FrameDifference[3];
-  vtkImageData * OutputFrame[3];
+  vtkImageData *FrameDifference[3];
+  vtkImageData *OutputFrame[3];
   for (int i = 0; i < 3; i++)
     {
+    Pyramid[i] = NULL;
+    lowPass1[i] = NULL;
+    lowPass2[i] = NULL;
+    Difference[i] = NULL;
     FrameDifference[i] = vtkImageData::New();
     OutputFrame[i] = vtkImageData::New();
     }
-
-  vtkSmartPointer<vtkImageExtractComponents> imageSource; // Moved outside since we need it to add back the differences
-  vtkSmartPointer<vtkImageYIQToRGB> rgbConversionFilter =
-    vtkSmartPointer<vtkImageYIQToRGB>::New(); // Made a global variable so that can be accessed by mapper
-
-
-
   int frameSize[NumberOfPyramidLevels];
+
   // Create reader to read all images
   vtksys::SystemTools::ConvertToUnixSlashes(dirString);
   vtkSmartPointer<vtkGlobFileNames> glob = vtkSmartPointer<vtkGlobFileNames>::New();
@@ -103,8 +118,6 @@ int main(int argc, char* argv[])
     cout << inputFilename << "\n";
 
     // Read the file
-    vtkSmartPointer<vtkImageReader2Factory> readerFactory =
-      vtkSmartPointer<vtkImageReader2Factory>::New();
     vtkImageReader2 * imageReader = readerFactory->CreateImageReader2(inputFilename.c_str());
     imageReader->SetFileName(inputFilename.c_str());
     imageReader->Update();
@@ -113,15 +126,11 @@ int main(int argc, char* argv[])
     int imageDimension2 = imageDimensionArray[3] - imageDimensionArray[2] + 1;
 
     // ---------------------Get YIQ components-----------------------------
-    vtkSmartPointer<vtkImageRGBToYIQ> yiqFilter =
-      vtkSmartPointer<vtkImageRGBToYIQ>::New();
     yiqFilter->SetInputConnection(imageReader->GetOutputPort());
+    imageReader->Delete();
+
     yiqFilter->Update();
-
-
     vtkSmartPointer<vtkImageData> YIQs[3];
-    vtkSmartPointer<vtkImageExtractComponents> extractFilter =
-      vtkSmartPointer<vtkImageExtractComponents>::New();
     for (int color_channel=0; color_channel<3; color_channel++)
       {
       extractFilter->SetInputConnection(yiqFilter->GetOutputPort());
@@ -130,14 +139,15 @@ int main(int argc, char* argv[])
       YIQs[color_channel] = extractFilter->GetOutput();
       }
 
-    //-------------------------------------------------------------------------
-
     // ------------------Create image pyramids------------------------------
     for (int color_channel=0; color_channel<3; color_channel++)
       {
+      if (Pyramid[color_channel])
+        {
+        delete Pyramid[color_channel];
+        }
       Pyramid[color_channel] = new vtkImagePyramid(YIQs[color_channel], NumberOfPyramidLevels);
       }
-    //-------------------------------------------------------------------------
 
     for (int color_channel=0; color_channel<3; color_channel++)
       {
@@ -146,6 +156,14 @@ int main(int argc, char* argv[])
       // first frame(which means first value of frame difference is going to be zero)
       if (ImageNumber==0)
         {
+        if (lowPass1[color_channel])
+          {
+          delete lowPass1[color_channel];
+          }
+        if (lowPass2[color_channel])
+          {
+          delete lowPass2[color_channel];
+          }
         lowPass1[color_channel] = new vtkImagePyramid();
         lowPass2[color_channel] = new vtkImagePyramid();
         lowPass1[color_channel]->ShallowCopy(Pyramid[color_channel]);
@@ -154,9 +172,8 @@ int main(int argc, char* argv[])
       else
         {
         //---------Temporal IIR(Infinite impulse response) filtering-----------
+
         // -------Updating lowpass variable------
-        vtkSmartPointer<vtkImageWeightedSum> sumFilter1 = vtkSmartPointer<vtkImageWeightedSum>::New();
-        vtkSmartPointer<vtkImageWeightedSum> sumFilter2 = vtkSmartPointer<vtkImageWeightedSum>::New();
         sumFilter1->SetWeight(0,r1);
         sumFilter1->SetWeight(1,(1-r1));
         sumFilter2->SetWeight(0,r2);
@@ -174,15 +191,11 @@ int main(int argc, char* argv[])
           lowPass2[color_channel]->vtkImagePyramidData[k]->ShallowCopy(sumFilter2->GetOutput());
           }
 
-        //------Updated lowpass variable-------
-
         //----Image Pyramid difference for IIR filtering-----
-        vtkSmartPointer<vtkImageDifference> differenceFilter = vtkSmartPointer<vtkImageDifference>::New();
-        differenceFilter->AllowShiftOff();
-        differenceFilter->AveragingOff();
-        differenceFilter->SetAllowShift(0);
-        differenceFilter->SetThreshold(0);
-        vtkSmartPointer<vtkImageMathematics> imageMath = vtkSmartPointer<vtkImageMathematics>::New();
+        if (Difference[color_channel])
+          {
+          delete Difference[color_channel];
+          }
         Difference[color_channel] = new vtkImagePyramid(NumberOfPyramidLevels);
         imageMath->SetOperationToSubtract();
         for (int k=0; k<NumberOfPyramidLevels; k++)
@@ -193,6 +206,7 @@ int main(int argc, char* argv[])
           Difference[color_channel]->vtkImagePyramidData[k]->ShallowCopy(imageMath->GetOutput());
           }
         // ------End of pyramid difference------
+
         // ------------------End of temporal filtering---------------------------
 
         // ----------------Get image dimensions for spatial filtering------------
@@ -206,9 +220,7 @@ int main(int argc, char* argv[])
           }
         // ----------------------------------------------------------------------
 
-        vtkSmartPointer<vtkImageMathematics> differenceBooster = vtkSmartPointer<vtkImageMathematics>::New();
         differenceBooster->SetOperationToMultiplyByK();
-
         for (int k=1; k<NumberOfPyramidLevels-1; k++)
           {
           int currAlpha = frameSize[k]/(delta*8) - 1;
@@ -218,6 +230,7 @@ int main(int argc, char* argv[])
             {
             mutiplier = alpha;
             }
+
           // ----------Verify that multiplier is a float(or acceptable data format for SetConstantK)--------
           differenceBooster->SetConstantK(mutiplier);
           differenceBooster->SetInput1Data(Difference[color_channel]->vtkImagePyramidData[k]);
@@ -227,11 +240,8 @@ int main(int argc, char* argv[])
           // -------------End of spatial filtering----------------------
 
         //-----------Collapse the image Pyramid------------------------
-        vtkSmartPointer<vtkImageResize> resize;
-        resize = vtkSmartPointer<vtkImageResize>::New();
         resize->SetResizeMethodToOutputDimensions();
 
-        vtkSmartPointer<vtkImageWeightedSum> sumFilter = vtkSmartPointer<vtkImageWeightedSum>::New();
         sumFilter->SetWeight(0,0.5);
         sumFilter->SetWeight(1,0.5);
 
@@ -249,8 +259,6 @@ int main(int argc, char* argv[])
           resize->SetOutputDimensions(imageDimension1/pow(2,(g-1)), imageDimension2/pow(2,(g-1)), -1);
           resize->Update();
 
-          vtkSmartPointer<vtkImageConvolve> convolveFilter2 =
-            vtkSmartPointer<vtkImageConvolve>::New();
           convolveFilter2->SetInputData(resize->GetOutput());
           double kernel[25] = {1,4,6,4,1,
                                4,16,24,16,4,
@@ -277,8 +285,6 @@ int main(int argc, char* argv[])
         //---------------Pyramid Collapsed into image---------------------------
 
         //----------Chromatic Abberation to reduce noise---------------
-        vtkSmartPointer<vtkImageMathematics> chromaticCorrection =
-          vtkSmartPointer<vtkImageMathematics>::New();
         chromaticCorrection->SetOperationToMultiplyByK();
         chromaticCorrection->SetConstantK(chromatic_abberation);
         if (color_channel != YChannel)
@@ -289,8 +295,6 @@ int main(int argc, char* argv[])
           }
 
         //--------Add back frame difference to the original frame that we have read------
-        vtkSmartPointer<vtkImageWeightedSum> addDifferenceOrigFrameFilter =
-          vtkSmartPointer<vtkImageWeightedSum>::New();
         // Note that we might have to multiply the intensity with a factor of 2 later...
         addDifferenceOrigFrameFilter->SetWeight(0,.5);
         addDifferenceOrigFrameFilter->SetWeight(1,.5);
@@ -299,8 +303,6 @@ int main(int argc, char* argv[])
         addDifferenceOrigFrameFilter->Update();
         OutputFrame[color_channel]->ShallowCopy(addDifferenceOrigFrameFilter->GetOutput());
 
-        vtkSmartPointer<vtkImageMathematics> IntensityNormalisation =
-          vtkSmartPointer<vtkImageMathematics>::New();
         IntensityNormalisation->SetOperationToMultiplyByK();
         IntensityNormalisation->SetConstantK(2);
         IntensityNormalisation->SetInput1Data(OutputFrame[color_channel]);
@@ -315,12 +317,10 @@ int main(int argc, char* argv[])
 
     if (ImageNumber!=0)
       {
-      vtkSmartPointer<vtkImageAppendComponents> appendFilter =
-        vtkSmartPointer<vtkImageAppendComponents>::New();
       //cerr << "Y dims: " << showDims(OutputFrame[YChannel]) << endl
       //     << "I dims: " << showDims(OutputFrame[IChannel]) << endl
       //     << "Q dims: " << showDims(OutputFrame[QChannel]) << endl;
-      appendFilter->AddInputData(OutputFrame[YChannel]);
+      appendFilter->SetInputData(OutputFrame[YChannel]);
       appendFilter->AddInputData(OutputFrame[IChannel]);
       appendFilter->AddInputData(OutputFrame[QChannel]);
       appendFilter->Update();
@@ -333,12 +333,22 @@ int main(int argc, char* argv[])
 
       std::string iterationNumberString = to_string(ImageNumber);
       std::string outputFileName = "OutputFrame" + iterationNumberString+".png";
-      vtkSmartPointer<vtkPNGWriter> writeDifferenceFrames = vtkSmartPointer<vtkPNGWriter>::New();
       writeDifferenceFrames->SetFileName(outputFileName.c_str());
       writeDifferenceFrames->SetInputData(rgbConversionFilter->GetOutput());
       writeDifferenceFrames->Write();
     }
 
   } //End of iteration over all input frames of the video(input images)
+
+  for (int i = 0; i < 3; i++)
+    {
+    delete Pyramid[i];
+    delete lowPass1[i];
+    delete lowPass2[i];
+    delete Difference[i];
+    FrameDifference[i]->Delete();
+    OutputFrame[i]->Delete();
+    }
+
   return EXIT_SUCCESS;
 }
